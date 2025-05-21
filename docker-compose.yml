@@ -1,0 +1,155 @@
+version: '3.8'
+
+services:
+  dremio:
+    platform: linux/x86_64
+    image: dremio/dremio-oss:25.2
+    ports:
+      - "9047:9047"
+      - "31010:31010"
+      - "32010:32010"
+    container_name: dremio
+    networks:
+      - iceberg_env
+
+  minio:
+    image: quay.io/minio/minio
+    container_name: minio_server
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - iceberg_env
+
+  spark_notebook:
+    image: alexmerced/spark33-notebook
+    ports: 
+      - "8888:8888"
+    env_file: .env
+    container_name: notebook
+    networks:
+      - iceberg_env
+
+  nessie:
+    image: projectnessie/nessie
+    container_name: nessie
+    ports:
+      - "19120:19120"
+    networks:
+      - iceberg_env
+
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+    networks:
+      - airflow_network
+
+  airflow-webserver:
+    image: apache/airflow:2.9.2
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+      AIRFLOW__WEBSERVER__WORKERS: 2
+      AIRFLOW__WEBSERVER__WORKER_TIMEOUT: 120
+      AIRFLOW__WEBSERVER__WORKER_CLASS: "sync"
+      _PIP_ADDITIONAL_REQUIREMENTS: "boto3 apache-airflow-providers-amazon==5.0.0 minio apache-airflow-providers-docker scikit-learn"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./config:/opt/airflow/config
+      - ./plugins:/opt/airflow/plugins
+      - ./data:/opt/airflow/data  # Mount volume cho thư mục data
+    ports:
+      - "8080:8080"
+    command: webserver
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - airflow_network
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.2
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+      AIRFLOW__SCHEDULER__SCHEDULER_HEARTBEAT_SEC: 60
+      AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: 300
+      _PIP_ADDITIONAL_REQUIREMENTS: "boto3 apache-airflow-providers-amazon==5.0.0 minio apache-airflow-providers-docker scikit-learn"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./config:/opt/airflow/config
+      - ./plugins:/opt/airflow/plugins
+      - ./data:/opt/airflow/data  # Mount volume cho thư mục data
+    command: scheduler
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - airflow_network
+
+  airflow-init:
+    image: apache/airflow:2.9.2
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      AIRFLOW__CORE__FERNET_KEY: ''
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+      _PIP_ADDITIONAL_REQUIREMENTS: "boto3 apache-airflow-providers-amazon==5.0.0 minio apache-airflow-providers-docker scikit-learn"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./config:/opt/airflow/config
+      - ./plugins:/opt/airflow/plugins
+      - ./data:/opt/airflow/data  # Mount volume cho thư mục data
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db init
+        airflow users create --username admin --password admin --firstname Admin --lastname Admin --role Admin --email admin@airflow.com
+        exec /entrypoint airflow version
+    restart: "no"
+    networks:
+      - airflow_network
+
+volumes:
+  postgres-db-volume:
+  minio_data:
+  data:  # Thêm volume cho thư mục data
+
+networks:
+  iceberg_env:
+    driver: bridge
+  airflow_network:
+    driver: bridge
